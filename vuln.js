@@ -59,8 +59,6 @@ app.post('/login', (req, res) => {
 });
 
 // *************** NEW: additional intentionally vulnerable login (even more noisy) ***************
-// This route demonstrates the same SQLi but intentionally logs environment and echoes secrets.
-// Keeps original /login for backward compatibility.
 app.post('/vuln_login', (req, res) => {
   const username = (req.body && req.body.username) || '';
   const password = (req.body && req.body.password) || '';
@@ -79,9 +77,7 @@ app.post('/vuln_login', (req, res) => {
 
     // Even weaker session token (predictable) and included in response body (bad)
     const token = createSessionToken(username);
-    // No HttpOnly, no Secure, no SameSite — intentionally insecure
     res.setHeader('Set-Cookie', `sid=${token}; Path=/;`);
-    // echo back secret field (information disclosure demonstration)
     res.json({
       ok: true,
       user: row.username,
@@ -94,7 +90,6 @@ app.post('/vuln_login', (req, res) => {
 
 // *************** Endpoint: echo (reflected XSS) ***************
 app.get('/echo', (req, res) => {
-  // reflected XSS: echoes unsanitized query param into HTML
   const msg = req.query.msg || '';
   res.send(`<html><body>Message: ${msg}</body></html>`);
 });
@@ -102,30 +97,25 @@ app.get('/echo', (req, res) => {
 // *************** Endpoint: run command (command injection) ***************
 app.get('/run', (req, res) => {
   const cmd = req.query.cmd || 'date';
-  // vulnerable: passes unsanitized user input to shell
   child.exec(`echo "Running:"; ${cmd}`, { timeout: 5000 }, (err, stdout, stderr) => {
     if (err) return res.status(500).send('error running command');
-    // leaking stderr/stdout
     res.type('text/plain').send(stdout + '\n' + stderr);
   });
 });
 
 // *************** File download with path traversal ***************
 app.get('/download', (req, res) => {
-  // vulnerable: naive concat allows path traversal via ?file=../../etc/passwd
   const f = req.query.file || 'public/info.txt';
   const full = path.join(__dirname, f);
   if (!fs.existsSync(full)) return res.status(404).send('not found');
-  res.download(full); // may disclose arbitrary files if path traversal used
+  res.download(full);
 });
 
 // *************** Unsafe deserialization ***************
 app.post('/deserialize', (req, res) => {
-  // expects 'payload' to be a stringified JS object, but uses eval (RCE risk)
   const payload = req.body.payload;
   try {
-    // DANGEROUS: eval on attacker-controlled input
-    const obj = eval('(' + payload + ')');
+    const obj = eval('(' + payload + ')'); // dangerous eval
     res.json({ parsed: obj });
   } catch (e) {
     res.status(400).send('bad payload');
@@ -135,45 +125,39 @@ app.post('/deserialize', (req, res) => {
 // *************** Open redirect ***************
 app.get('/go', (req, res) => {
   const url = req.query.url || '/';
-  // naive redirect can be used for phishing
   res.redirect(url);
 });
 
-// *************** Unvalidated file write (resource exhaustion / overwrite) ***************
+// *************** Unvalidated file write ***************
 app.post('/upload', (req, res) => {
-  // naive write: expects raw body with filename query param
   const filename = req.query.filename || 'upload.tmp';
   const uploadsDir = path.join(__dirname, 'uploads');
   try { if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir); } catch (e) {}
-  const filepath = path.join(uploadsDir, filename); // attacker can set filename="../evil"
+  const filepath = path.join(uploadsDir, filename);
   const content = JSON.stringify(req.body || {});
-  // no size checks, no validation
   fs.writeFileSync(filepath, content);
   res.json({ ok: true, path: filepath });
 });
 
 // *************** Info leak endpoints ***************
 app.get('/leak', (req, res) => {
-  // intentionally leaks environment and config
   res.json({
     nodeVersion: process.version,
     cwd: process.cwd(),
-    env: process.env, // sensitive: secrets may be in env
+    env: process.env,
     args: process.argv
   });
 });
 
-// *************** Unsafe eval for templating (XSS + code exec) ***************
+// *************** Unsafe eval templating ***************
 app.get('/render', (req, res) => {
   const tmpl = req.query.tmpl || "Hello, ${name}";
-  // uses Function constructor with unsanitized input -> RCE
   const render = new Function('data', `return \`${tmpl}\``);
   const out = render({ name: req.query.name || 'guest' });
   res.send(out);
 });
 
-// *************** Additional tiny utilities that make it noisier for scanners ***************
-// route that intentionally returns stack traces and prints process memory usage
+// *************** Debug info endpoint ***************
 app.get('/debug_info', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.send(JSON.stringify({
@@ -181,6 +165,31 @@ app.get('/debug_info', (req, res) => {
     memory: process.memoryUsage(),
     stack: (new Error('stack-sample')).stack
   }, null, 2));
+});
+
+// ================================================================
+// Sonar Rule Demonstration: javascript:S3500
+// "const" variables should not be reassigned
+// ================================================================
+app.get('/const_violation_demo', (req, res) => {
+  // Deliberate Sonar violation (const reassignment)
+  const pi = 3.14;
+  try {
+    // This reassigns a const variable -> TypeError at runtime
+    // SonarQube should detect this as rule javascript:S3500
+    pi = 3.14159; // Noncompliant
+  } catch (err) {
+    console.error('[DEMO] Reassigning const failed as expected:', err.message);
+  }
+
+  // Correct way using let
+  let safePi = 3.14;
+  safePi = 3.14159;
+
+  res.send(`
+    <h2>SonarQube Rule Demo: javascript:S3500</h2>
+    <p>Attempted to reassign a const variable 'pi'. Check your SonarQube dashboard — this endpoint should trigger the rule.</p>
+  `);
 });
 
 // *************** Start server ***************
