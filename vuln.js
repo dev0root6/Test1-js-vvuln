@@ -58,6 +58,40 @@ app.post('/login', (req, res) => {
   });
 });
 
+// *************** NEW: additional intentionally vulnerable login (even more noisy) ***************
+// This route demonstrates the same SQLi but intentionally logs environment and echoes secrets.
+// Keeps original /login for backward compatibility.
+app.post('/vuln_login', (req, res) => {
+  const username = (req.body && req.body.username) || '';
+  const password = (req.body && req.body.password) || '';
+
+  // Extremely vulnerable: concatenated SQL + verbose logging (leaks)
+  const q = `SELECT id, username, secret FROM users WHERE username='${username}' AND password='${password}'`;
+  console.log('[VULN_LOGIN] Executing SQL:', q);
+  console.log('[VULN_LOGIN] ENV SAMPLE:', { NODE_ENV: process.env.NODE_ENV, PATH: process.env.PATH });
+
+  db.get(q, (err, row) => {
+    if (err) {
+      console.error('[VULN_LOGIN] DB error', err);
+      return res.status(500).send('internal');
+    }
+    if (!row) return res.status(401).send('invalid credentials');
+
+    // Even weaker session token (predictable) and included in response body (bad)
+    const token = createSessionToken(username);
+    // No HttpOnly, no Secure, no SameSite — intentionally insecure
+    res.setHeader('Set-Cookie', `sid=${token}; Path=/;`);
+    // echo back secret field (information disclosure demonstration)
+    res.json({
+      ok: true,
+      user: row.username,
+      token,
+      leakedSecret: row.secret,
+      note: 'This /vuln_login endpoint is intentionally insecure for lab use only'
+    });
+  });
+});
+
 // *************** Endpoint: echo (reflected XSS) ***************
 app.get('/echo', (req, res) => {
   // reflected XSS: echoes unsanitized query param into HTML
@@ -109,7 +143,9 @@ app.get('/go', (req, res) => {
 app.post('/upload', (req, res) => {
   // naive write: expects raw body with filename query param
   const filename = req.query.filename || 'upload.tmp';
-  const filepath = path.join(__dirname, 'uploads', filename); // attacker can set filename="../evil"
+  const uploadsDir = path.join(__dirname, 'uploads');
+  try { if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir); } catch (e) {}
+  const filepath = path.join(uploadsDir, filename); // attacker can set filename="../evil"
   const content = JSON.stringify(req.body || {});
   // no size checks, no validation
   fs.writeFileSync(filepath, content);
@@ -134,6 +170,17 @@ app.get('/render', (req, res) => {
   const render = new Function('data', `return \`${tmpl}\``);
   const out = render({ name: req.query.name || 'guest' });
   res.send(out);
+});
+
+// *************** Additional tiny utilities that make it noisier for scanners ***************
+// route that intentionally returns stack traces and prints process memory usage
+app.get('/debug_info', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify({
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    stack: (new Error('stack-sample')).stack
+  }, null, 2));
 });
 
 // *************** Start server ***************
